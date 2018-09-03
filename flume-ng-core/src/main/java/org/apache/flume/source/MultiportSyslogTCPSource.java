@@ -34,6 +34,7 @@ import org.apache.flume.Context;
 import org.apache.flume.Event;
 import org.apache.flume.EventDrivenSource;
 import org.apache.flume.channel.ChannelProcessor;
+import org.apache.flume.conf.BatchSizeSupported;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.conf.LogPrivacyUtil;
 import org.apache.flume.event.EventBuilder;
@@ -50,7 +51,7 @@ import org.slf4j.LoggerFactory;
  *
  */
 public class MultiportSyslogTCPSource extends AbstractSource implements
-        EventDrivenSource, Configurable {
+        EventDrivenSource, Configurable, BatchSizeSupported {
 
   public static final Logger logger = LoggerFactory.getLogger(
           MultiportSyslogTCPSource.class);
@@ -208,6 +209,11 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
     return "Multiport Syslog TCP source " + getName();
   }
 
+  @Override
+  public long getBatchSize() {
+    return batchSize;
+  }
+
   static class MultiportSyslogHandler extends IoHandlerAdapter {
 
     private static final String SAVED_BUF = "savedBuffer";
@@ -243,6 +249,7 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
     public void exceptionCaught(IoSession session, Throwable cause)
         throws Exception {
       logger.error("Error in syslog message handler", cause);
+      sourceCounter.incrementGenericProcessingFail();
       if (cause instanceof Error) {
         Throwables.propagate(cause);
       }
@@ -320,6 +327,7 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
           sourceCounter.addToEventAcceptedCount(numEvents);
         } catch (Throwable t) {
           logger.error("Error writing to channel, event dropped", t);
+          sourceCounter.incrementEventReadOrChannelFail(t);
           if (t instanceof Error) {
             Throwables.propagate(t);
           }
@@ -341,6 +349,7 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
       } catch (Throwable t) {
         logger.info("Error decoding line with charset (" + decoder.charset() +
             "). Exception follows.", t);
+        sourceCounter.incrementEventReadFail();
 
         if (t instanceof Error) {
           Throwables.propagate(t);
@@ -377,6 +386,7 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
         event.getHeaders().put(SyslogUtils.EVENT_STATUS,
             SyslogUtils.SyslogStatus.INVALID.getSyslogStatus());
         logger.debug("Error parsing syslog event", ex);
+        sourceCounter.incrementEventReadFail();
       }
 
       return event;
