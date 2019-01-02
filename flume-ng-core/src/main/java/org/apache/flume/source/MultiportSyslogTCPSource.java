@@ -21,6 +21,7 @@ package org.apache.flume.source;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.Charset;
@@ -30,6 +31,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+
+import javax.net.ssl.SSLParameters;
+
 import org.apache.flume.Context;
 import org.apache.flume.Event;
 import org.apache.flume.EventDrivenSource;
@@ -43,6 +47,7 @@ import org.apache.mina.core.buffer.IoBuffer;
 import org.apache.mina.core.service.IoHandlerAdapter;
 import org.apache.mina.core.session.IdleStatus;
 import org.apache.mina.core.session.IoSession;
+import org.apache.mina.filter.ssl.SslFilter;
 import org.apache.mina.transport.socket.nio.NioSocketAcceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +55,7 @@ import org.slf4j.LoggerFactory;
 /**
  *
  */
-public class MultiportSyslogTCPSource extends AbstractSource implements
+public class MultiportSyslogTCPSource extends SslContextAwareAbstractSource implements
         EventDrivenSource, Configurable, BatchSizeSupported {
 
   public static final Logger logger = LoggerFactory.getLogger(
@@ -66,6 +71,8 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
   private int batchSize;
   private int readBufferSize;
   private String portHeader;
+  private String clientIPHeader;
+  private String clientHostnameHeader;
   private SourceCounter sourceCounter = null;
   private Charset defaultCharset;
   private ThreadSafeDecoder defaultDecoder;
@@ -77,6 +84,7 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
 
   @Override
   public void configure(Context context) {
+    configureSsl(context);
     String portsStr = context.getString(
             SyslogSourceConfigurationConstants.CONFIG_PORTS);
 
@@ -135,7 +143,13 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
         SyslogSourceConfigurationConstants.DEFAULT_BATCHSIZE);
 
     portHeader = context.getString(
-            SyslogSourceConfigurationConstants.CONFIG_PORT_HEADER);
+        SyslogSourceConfigurationConstants.CONFIG_PORT_HEADER);
+
+    clientIPHeader = context.getString(
+        SyslogSourceConfigurationConstants.CONFIG_CLIENT_IP_HEADER);
+
+    clientHostnameHeader = context.getString(
+        SyslogSourceConfigurationConstants.CONFIG_CLIENT_HOSTNAME_HEADER);
 
     readBufferSize = context.getInteger(
         SyslogSourceConfigurationConstants.CONFIG_READBUF_SIZE,
@@ -161,13 +175,22 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
     } else {
       acceptor = new NioSocketAcceptor();
     }
+
+    getSslContextSupplier().get().ifPresent(sslContext -> {
+      SslFilter filter = new SslFilter(sslContext);
+      SSLParameters sslParameters = sslContext.getDefaultSSLParameters();
+      filter.setEnabledProtocols(getFilteredProtocols(sslParameters));
+      filter.setEnabledCipherSuites(getFilteredCipherSuites(sslParameters));
+      acceptor.getFilterChain().addFirst("ssl", filter);
+    });
+
     acceptor.setReuseAddress(true);
     acceptor.getSessionConfig().setReadBufferSize(readBufferSize);
     acceptor.getSessionConfig().setIdleTime(IdleStatus.BOTH_IDLE, 10);
 
     acceptor.setHandler(new MultiportSyslogHandler(maxEventSize, batchSize,
-        getChannelProcessor(), sourceCounter, portHeader, defaultDecoder,
-        portCharsets, keepFields));
+        getChannelProcessor(), sourceCounter, portHeader, clientIPHeader,
+        clientHostnameHeader, defaultDecoder, portCharsets, keepFields));
 
     for (int port : ports) {
       InetSocketAddress addr;
@@ -222,6 +245,8 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
     private final int batchSize;
     private final SourceCounter sourceCounter;
     private final String portHeader;
+    private final String clientIPHeader;
+    private final String clientHostnameHeader;
     private final SyslogParser syslogParser;
     private final LineSplitter lineSplitter;
     private final ThreadSafeDecoder defaultDecoder;
@@ -230,14 +255,16 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
 
     public MultiportSyslogHandler(int maxEventSize, int batchSize,
         ChannelProcessor cp, SourceCounter ctr, String portHeader,
-        ThreadSafeDecoder defaultDecoder,
-        ConcurrentMap<Integer, ThreadSafeDecoder> portCharsets,
-        Set<String> keepFields) {
+        String clientIPHeader, String clientHostnameHeader,
+        ThreadSafeDecoder defaultDecoder, ConcurrentMap<Integer,
+        ThreadSafeDecoder> portCharsets, Set<String> keepFields) {
       channelProcessor = cp;
       sourceCounter = ctr;
       this.maxEventSize = maxEventSize;
       this.batchSize = batchSize;
       this.portHeader = portHeader;
+      this.clientIPHeader = clientIPHeader;
+      this.clientHostnameHeader = clientHostnameHeader;
       this.defaultDecoder = defaultDecoder;
       this.portCharsets = portCharsets;
       this.keepFields = keepFields;
@@ -305,6 +332,17 @@ public class MultiportSyslogTCPSource extends AbstractSource implements
             if (portHeader != null) {
               event.getHeaders().put(portHeader, String.valueOf(port));
             }
+
+            if (clientIPHeader != null) {
+              event.getHeaders().put(clientIPHeader,
+                  SyslogUtils.getIP(session.getRemoteAddress()));
+            }
+
+            if (clientHostnameHeader != null) {
+              event.getHeaders().put(clientHostnameHeader,
+                  SyslogUtils.getHostname(session.getRemoteAddress()));
+            }
+
             events.add(event);
           } else {
             logger.trace("Parsed null event");

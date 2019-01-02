@@ -83,11 +83,14 @@ public class HDFSEventSink extends AbstractSink implements Configurable, BatchSi
   // Retry forever.
   private static final int defaultTryCount = Integer.MAX_VALUE;
 
+  public static final String IN_USE_SUFFIX_PARAM_NAME = "hdfs.inUseSuffix";
+
+
   /**
    * Default length of time we wait for blocking BucketWriter calls
    * before timing out the operation. Intended to prevent server hangs.
    */
-  private static final long defaultCallTimeout = 10000;
+  private static final long defaultCallTimeout = 30000;
   /**
    * Default number of threads available for tasks
    * such as append/open/close/flush with hdfs.
@@ -160,8 +163,6 @@ public class HDFSEventSink extends AbstractSink implements Configurable, BatchSi
         // return true
         try {
           eldest.getValue().close();
-        } catch (IOException e) {
-          LOG.warn(eldest.getKey().toString(), e);
         } catch (InterruptedException e) {
           LOG.warn(eldest.getKey().toString(), e);
           Thread.currentThread().interrupt();
@@ -196,7 +197,16 @@ public class HDFSEventSink extends AbstractSink implements Configurable, BatchSi
     fileName = context.getString("hdfs.filePrefix", defaultFileName);
     this.suffix = context.getString("hdfs.fileSuffix", defaultSuffix);
     inUsePrefix = context.getString("hdfs.inUsePrefix", defaultInUsePrefix);
-    inUseSuffix = context.getString("hdfs.inUseSuffix", defaultInUseSuffix);
+    boolean emptyInUseSuffix = context.getBoolean("hdfs.emptyInUseSuffix", false);
+    if (emptyInUseSuffix) {
+      inUseSuffix = "";
+      String tmpInUseSuffix = context.getString(IN_USE_SUFFIX_PARAM_NAME);
+      if (tmpInUseSuffix != null) {
+        LOG.warn("Ignoring parameter " + IN_USE_SUFFIX_PARAM_NAME + " for hdfs sink: " + getName());
+      }
+    } else {
+      inUseSuffix = context.getString(IN_USE_SUFFIX_PARAM_NAME, defaultInUseSuffix);
+    }
     String tzName = context.getString("hdfs.timeZone");
     timeZone = tzName == null ? null : TimeZone.getTimeZone(tzName);
     rollInterval = context.getLong("hdfs.rollInterval", defaultRollInterval);
@@ -462,16 +472,16 @@ public class HDFSEventSink extends AbstractSink implements Configurable, BatchSi
   BucketWriter initializeBucketWriter(String realPath,
       String realName, String lookupPath, HDFSWriter hdfsWriter,
       WriterCallback closeCallback) {
+    HDFSWriter actualHdfsWriter = mockFs == null ? hdfsWriter : mockWriter;
     BucketWriter bucketWriter = new BucketWriter(rollInterval,
         rollSize, rollCount,
         batchSize, context, realPath, realName, inUsePrefix, inUseSuffix,
-        suffix, codeC, compType, hdfsWriter, timedRollerPool,
+        suffix, codeC, compType, actualHdfsWriter, timedRollerPool,
         privExecutor, sinkCounter, idleTimeout, closeCallback,
         lookupPath, callTimeout, callTimeoutPool, retryInterval,
         tryCount);
     if (mockFs != null) {
       bucketWriter.setFileSystem(mockFs);
-      bucketWriter.setMockStream(mockWriter);
     }
     return bucketWriter;
   }
@@ -484,7 +494,7 @@ public class HDFSEventSink extends AbstractSink implements Configurable, BatchSi
         LOG.info("Closing {}", entry.getKey());
 
         try {
-          entry.getValue().close();
+          entry.getValue().close(false, true);
         } catch (Exception ex) {
           LOG.warn("Exception while closing " + entry.getKey() + ". " +
                   "Exception follows.", ex);
